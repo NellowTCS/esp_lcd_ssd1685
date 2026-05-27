@@ -1,5 +1,5 @@
 dependencies:
-  idf: '>=5.5.1'
+  idf: '>=5.5'
 description: esp_lcd driver for SSD1685 displays
 url: https://github.com/NellowTCS/esp_lcd_ssd1685
-version: 1.0.0
+version: 1.0.1
