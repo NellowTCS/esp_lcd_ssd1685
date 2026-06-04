@@ -380,6 +380,9 @@ static void demo_partial(esp_lcd_panel_handle_t panel, int w, int h)
 }
 
 /* app_main */
+#ifdef __cplusplus
+extern "C"
+#endif
 void app_main(void)
 {
     ESP_LOGI(TAG, "SSD1685 non-LVGL demo starting...");

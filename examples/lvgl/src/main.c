@@ -244,6 +244,9 @@ static void build_demo_ui(void)
 }
 
 /* app_main */
+#ifdef __cplusplus
+extern "C"
+#endif
 void app_main(void)
 {
     ESP_LOGI(TAG, "SSD1685 LVGL demo starting...");
