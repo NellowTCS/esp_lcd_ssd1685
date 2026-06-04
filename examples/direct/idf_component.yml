@@ -1,0 +1,6 @@
+dependencies:
+  idf: '>=5.5'
+  esp_lcd_ssd1685:
+    # The override_path below makes `idf.py build` inside the repo use the local
+    # source so CI always tests the version being reviewed, not a published release.
+    override_path: "../../../"

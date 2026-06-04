@@ -1,0 +1,36 @@
+name: Build Examples
+
+on:
+  push:
+    branches: [ "main", "master" ]
+  pull_request:
+    branches: [ "main", "master" ]
+
+jobs:
+  build:
+    name: Build ${{ matrix.example }} @ IDF ${{ matrix.idf_version }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      fail-fast: false
+      matrix:
+        idf_version: ["v5.5.1"]
+        example:
+          - examples/no_lvgl
+          - examples/lvgl_demo
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # esp-idf-ci-action sets up the IDF environment and runs idf.py build
+      # inside the given working directory.  The component under test is made
+      # available to each example via an `override_path` in its
+      # idf_component.yml so the component manager uses the local source
+      # rather than downloading from a registry.
+      - name: Build ${{ matrix.example }}
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: ${{ matrix.idf_version }}
+          target: esp32s3
+          path: ${{ matrix.example }}
