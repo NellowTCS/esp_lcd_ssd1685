@@ -16,8 +16,8 @@ jobs:
       matrix:
         idf_version: ["v5.5.1"]
         example:
-          - examples/no_lvgl
-          - examples/lvgl_demo
+          - examples/direct
+          - examples/lvgl
 
     steps:
       - name: Checkout
