@@ -150,8 +150,9 @@ static void lvgl_task(void *arg)
         if (xSemaphoreTake(s_lvgl_mux, portMAX_DELAY)) {
             uint32_t ms_to_next = lv_timer_handler();
             xSemaphoreGive(s_lvgl_mux);
-            if (ms_to_next == 0) ms_to_next = 1;
-            vTaskDelay(pdMS_TO_TICKS(ms_to_next));
+            TickType_t ticks = pdMS_TO_TICKS(ms_to_next);
+            if (ticks == 0) ticks = 1;
+            vTaskDelay(ticks);
         }
     }
 }
