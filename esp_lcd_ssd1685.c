@@ -106,7 +106,7 @@ static inline esp_err_t epd_cmd_data(ssd1685_panel_t *s, uint8_t cmd,
     return esp_lcd_panel_io_tx_param(s->io, cmd, data, len);
 }
 
-/* Send raw colour data (D/C = 1) – uses tx_color for potential DMA path */
+/* Send raw colour data (D/C = 1) - uses tx_color for potential DMA path */
 static inline esp_err_t epd_color(ssd1685_panel_t *s,
                                    const void *data, size_t len)
 {
@@ -121,7 +121,7 @@ esp_err_t esp_lcd_ssd1685_wait_busy(esp_lcd_panel_handle_t handle)
     ssd1685_panel_t *s = __containerof(handle, ssd1685_panel_t, base);
 
     if (s->busy_gpio < 0) {
-        /* No BUSY pin – use a worst-case delay */
+        /* No BUSY pin - use a worst-case delay */
         vTaskDelay(pdMS_TO_TICKS(500));
         return ESP_OK;
     }
@@ -144,9 +144,9 @@ esp_err_t esp_lcd_ssd1685_wait_busy(esp_lcd_panel_handle_t handle)
  * Compute data-entry-mode byte from mirror / swap flags
  *
  * SSD168x Data Entry Mode (0x11):
- *   Bit 2 : AM    – 0 = X direction, 1 = Y direction
- *   Bit 1 : ID[1] – Y increment direction
- *   Bit 0 : ID[0] – X increment direction
+ *   Bit 2 : AM    - 0 = X direction, 1 = Y direction
+ *   Bit 1 : ID[1] - Y increment direction
+ *   Bit 0 : ID[0] - X increment direction
  *
  * We use X-first scan (AM=0) and map mirror/swap to the ID bits so that
  * the host co-ordinate system always has (0,0) at top-left.
@@ -167,10 +167,10 @@ static uint8_t compute_entry_mode(bool swap_xy, bool mirror_x, bool mirror_y)
     }
 
     if (mirror_x) {
-        mode ^= 0x01;   /* toggle ID[0] – X direction */
+        mode ^= 0x01;   /* toggle ID[0] - X direction */
     }
     if (mirror_y) {
-        mode ^= 0x02;   /* toggle ID[1] – Y direction */
+        mode ^= 0x02;   /* toggle ID[1] - Y direction */
     }
 
     return mode;
@@ -335,7 +335,7 @@ esp_err_t esp_lcd_ssd1685_clear(esp_lcd_panel_handle_t handle, uint8_t color_byt
     {
         /* Send write-RAM command (this also sets D/C=1 for subsequent data) */
         /* First call with cmd sets up the write; subsequent calls need to be
-         * raw data – but the IO layer wraps each call with cmd.  The SSD168x
+         * raw data - but the IO layer wraps each call with cmd.  The SSD168x
          * auto-increments the RAM counter on each byte so we can break the
          * transfer into multiple esp_lcd_panel_io_tx_color() calls as long as
          * we don't interleave commands. */
@@ -356,7 +356,7 @@ esp_err_t esp_lcd_ssd1685_clear(esp_lcd_panel_handle_t handle, uint8_t color_byt
         }
     }
 
-    /* RED plane – fill with 0x00 (no red) */
+    /* RED plane - fill with 0x00 (no red) */
     uint8_t red_fill = 0x00;
     uint8_t red_chunk[CHUNK];
     memset(red_chunk, red_fill, CHUNK);
@@ -415,7 +415,7 @@ esp_err_t esp_lcd_ssd1685_load_lut(esp_lcd_panel_handle_t handle,
 }
 
 /* =========================================================================
- * Factory function – esp_lcd_new_panel_ssd1685()
+ * Factory function - esp_lcd_new_panel_ssd1685()
  * =========================================================================*/
 esp_err_t esp_lcd_new_panel_ssd1685(
         const esp_lcd_panel_io_handle_t io,
@@ -574,17 +574,17 @@ static esp_err_t panel_ssd1685_init(esp_lcd_panel_t *panel)
     ESP_RETURN_ON_ERROR(set_ram_window(s, 0, 0, s->width, s->height),
                         TAG, "full RAM window");
 
-    /* 5. Border waveform  (0x3C)  –  HIZ (float) border */
+    /* 5. Border waveform  (0x3C)  -  HIZ (float) border */
     buf[0] = 0x01;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_WRITE_BORDER, buf, 1),
                         TAG, "border waveform");
 
-    /* 6. Temperature sensor  (0x18)  – internal */
+    /* 6. Temperature sensor  (0x18)  - internal */
     buf[0] = SSD1685_TEMP_SENSOR_INTERNAL;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_TEMP_SENSOR_CTRL, buf, 1),
                         TAG, "temp sensor");
 
-    /* 7. VCOM  (0x2C)  – -1.5 V (0x36) is a safe default; panel-specific */
+    /* 7. VCOM  (0x2C)  - -1.5 V (0x36) is a safe default; panel-specific */
     buf[0] = 0x36;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_WRITE_VCOM_REG, buf, 1),
                         TAG, "vcom");
@@ -611,9 +611,9 @@ static esp_err_t panel_ssd1685_init(esp_lcd_panel_t *panel)
  * draw_bitmap
  *
  * Parameters use the standard esp_lcd convention:
- *   x_start, y_start  – inclusive top-left
- *   x_end,   y_end    – exclusive bottom-right
- *   color_data         – packed 1 bpp bitmap, 1 = white / 0 = black,
+ *   x_start, y_start  - inclusive top-left
+ *   x_end,   y_end    - exclusive bottom-right
+ *   color_data         - packed 1 bpp bitmap, 1 = white / 0 = black,
  *                        MSB first, rows padded to byte boundary
  *
  * The function:
@@ -660,7 +660,7 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
             set_ram_window(s, x_start, y_start, x_end, y_end),
             TAG, "set RAM window");
 
-        /* Row width in bytes – each row is (x_end - x_start) bits, rounded up */
+        /* Row width in bytes - each row is (x_end - x_start) bits, rounded up */
         int row_pixels = x_end - x_start;
         int row_bytes  = (row_pixels + 7) / 8;
         int num_rows   = y_end - y_start;

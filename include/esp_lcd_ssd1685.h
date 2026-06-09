@@ -122,7 +122,7 @@ extern "C" {
  * -------------------------------------------------------------------------*/
 
 /**
- * @brief Refresh mode – controls waveform update sequence
+ * @brief Refresh mode - controls waveform update sequence
  */
 typedef enum {
     SSD1685_REFRESH_FULL    = 0, /**< Full update, slow but ghost-free         */
@@ -252,7 +252,7 @@ esp_err_t esp_lcd_ssd1685_refresh(esp_lcd_panel_handle_t panel,
  * @brief Select which colour plane subsequent draw_bitmap calls write to.
  *
  * For 2-colour (B/W) displays: only SSD1685_COLOR_PLANE_BW is relevant.
- * For 3-colour (B/W/R) displays: call draw_bitmap twice – once per plane.
+ * For 3-colour (B/W/R) displays: call draw_bitmap twice - once per plane.
  *
  * @param panel  Panel handle
  * @param plane  Colour plane to target
