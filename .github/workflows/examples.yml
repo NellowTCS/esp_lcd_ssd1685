@@ -34,3 +34,19 @@ jobs:
           esp_idf_version: ${{ matrix.idf_version }}
           target: esp32s3
           path: ${{ matrix.example }}
+
+      - name: Prepare artifact name
+        id: prep
+        run: |
+          NAME=$(echo "${{ matrix.example }}" | tr '/' '-')
+          echo "name=${NAME}-${{ matrix.idf_version }}" >> "$GITHUB_OUTPUT"
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.prep.outputs.name }}
+          path: |
+            ${{ matrix.example }}/build/*.bin
+            ${{ matrix.example }}/build/flash_args
+            ${{ matrix.example }}/build/flash_project_args
+          if-no-files-found: warn
