@@ -2,4 +2,5 @@ dependencies:
   idf: '>=5.5'
   esp_lcd_ssd1685:
     override_path: "../../../"
-  lvgl/lvgl: ">=9.0.0,<10.0.0"
+  lvgl/lvgl:
+    version: ">=9.0.0,<10.0.0"
