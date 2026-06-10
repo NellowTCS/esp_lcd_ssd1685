@@ -21,7 +21,6 @@
 #include "esp_log.h"
 #include "esp_check.h"
 #include "esp_timer.h"
-#include "esp_task_wdt.h"
 
 #include "esp_lcd_ssd1685.h"
 
@@ -768,9 +767,6 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
 
         const uint8_t *src = (const uint8_t *)color_data;
         for (int ly = 0; ly < src_h; ly++) {
-            if ((ly & 0x1F) == 0) {
-                esp_task_wdt_reset();
-            }
             for (int lx = 0; lx < src_w; lx++) {
                 uint8_t bit = get_bit_1bpp(src, src_row_bytes, lx, ly);
                 if (s->invert_color) {

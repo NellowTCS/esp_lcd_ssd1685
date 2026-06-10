@@ -22,7 +22,6 @@
 
 #include "lvgl.h"
 #include "esp_lcd_ssd1685.h"
-#include "esp_task_wdt.h"
 
 static const char *TAG = "epd_lvgl";
 
@@ -108,14 +107,12 @@ static void epd_refresh_task(void *arg)
  *
  * LVGL hands us a buffer whose rows are padded to 4 bytes.
  * We repack to 1-byte-aligned rows before calling draw_bitmap.
- *
- * The driver's swap_xy rotation loop is slow (~seconds for a full frame),
- * so we feed the task watchdog during the row copy.
  */
 static void lvgl_flush_cb(lv_display_t *disp,
                           const lv_area_t *area,
                           uint8_t *px_map)
 {
+    /* Area in the LVGL logical co-ordinate space */
     int x1 = area->x1;
     int y1 = area->y1;
     int x2 = area->x2;
@@ -123,32 +120,41 @@ static void lvgl_flush_cb(lv_display_t *disp,
     int w = x2 - x1 + 1;
     int h = y2 - y1 + 1;
 
+    px_map += 8; /* skip LVGL I1 8-byte palette */
+
+    /* LVGL I1 row stride (4-byte aligned) */
     int lvgl_stride = (int)(((unsigned int)(w + 31) / 32u) * 4u);
+
+    /* EPD row stride (1-byte aligned) */
     int epd_stride = (w + 7) / 8;
 
+    /*
+     * LVGL with LV_DISPLAY_RENDER_MODE_FULL always flushes the entire
+     * framebuffer in a single call, so area == {0,0,w-1,h-1} and
+     * lvgl_stride is based on the display width, not the area width.
+     * Use the display width for the source stride.
+     */
     int disp_w = (int)lv_display_get_horizontal_resolution(disp);
     int src_stride = (int)(((unsigned int)(disp_w + 31) / 32u) * 4u);
 
     if (lvgl_stride != epd_stride)
     {
+        /* Repack: copy only the valid pixel bytes from each LVGL row */
         for (int row = 0; row < h; row++)
         {
             const uint8_t *src = px_map + (size_t)row * src_stride;
             uint8_t *dst = s_epd_buf + (size_t)row * epd_stride;
             memcpy(dst, src, (size_t)epd_stride);
-            if ((row & 0x0F) == 0)
-            {
-                esp_task_wdt_reset();
-            }
         }
         esp_lcd_panel_draw_bitmap(s_panel, x1, y1, x2 + 1, y2 + 1, s_epd_buf);
     }
     else
     {
-        esp_task_wdt_reset();
+        /* Strides match - pass the LVGL buffer directly */
         esp_lcd_panel_draw_bitmap(s_panel, x1, y1, x2 + 1, y2 + 1, px_map);
     }
 
+    /* Signal the refresh task on the last flush of this render cycle */
     if (lv_display_flush_is_last(disp))
     {
         xSemaphoreGive(s_refresh_sem);
@@ -401,7 +407,7 @@ extern "C"
      * We allocate two full-frame I1 buffers at LVGL's stride so LVGL
      * can use them without any internal realloc.                       */
     size_t lvgl_stride = (((size_t)LVGL_WIDTH + 31u) / 32u) * 4u;
-    size_t lvgl_buf_sz = lvgl_stride * (size_t)LVGL_HEIGHT;
+    size_t lvgl_buf_sz = lvgl_stride * (size_t)LVGL_HEIGHT + 8u;
 
     ESP_LOGI(TAG, "LVGL  %dx%d  lvgl_stride=%zu  epd_stride=%zu  buf=%zu bytes",
              LVGL_WIDTH, LVGL_HEIGHT, lvgl_stride, epd_stride, lvgl_buf_sz);
