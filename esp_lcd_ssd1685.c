@@ -121,7 +121,6 @@ esp_err_t esp_lcd_ssd1685_wait_busy(esp_lcd_panel_handle_t handle)
     ssd1685_panel_t *s = __containerof(handle, ssd1685_panel_t, base);
 
     if (s->busy_gpio < 0) {
-        /* No BUSY pin - use a worst-case delay */
         vTaskDelay(pdMS_TO_TICKS(500));
         return ESP_OK;
     }
@@ -129,7 +128,6 @@ esp_err_t esp_lcd_ssd1685_wait_busy(esp_lcd_panel_handle_t handle)
     uint64_t start_us = esp_timer_get_time();
     uint64_t timeout_us = (uint64_t)s->busy_timeout_ms * 1000ULL;
 
-    /* BUSY = HIGH means the controller is working.  Wait for it to go LOW. */
     while (gpio_get_level(s->busy_gpio) == 1) {
         if ((esp_timer_get_time() - start_us) > timeout_us) {
             ESP_LOGE(TAG, "BUSY timeout after %lu ms", (unsigned long)s->busy_timeout_ms);
@@ -142,35 +140,23 @@ esp_err_t esp_lcd_ssd1685_wait_busy(esp_lcd_panel_handle_t handle)
 
 /* -------------------------------------------------------------------------
  * Compute data-entry-mode byte from mirror / swap flags
- *
- * SSD168x Data Entry Mode (0x11):
- *   Bit 2 : AM    - 0 = X direction, 1 = Y direction
- *   Bit 1 : ID[1] - Y increment direction
- *   Bit 0 : ID[0] - X increment direction
- *
- * We use X-first scan (AM=0) and map mirror/swap to the ID bits so that
- * the host co-ordinate system always has (0,0) at top-left.
  * -------------------------------------------------------------------------*/
 static uint8_t compute_entry_mode(bool swap_xy, bool mirror_x, bool mirror_y)
 {
-    /* Default (no transforms): X increment, Y increment, X-first
-     *   AM=0, ID[1]=1, ID[0]=1  → 0x03  */
     uint8_t mode = 0x03;
 
     if (swap_xy) {
-        /* Switch to Y-first scan */
-        mode = (mode & ~0x04) | 0x04;   /* AM = 1 */
-        /* Swap the meaning of X/Y increment bits */
+        mode = (mode & ~0x04) | 0x04;
         bool old_id0 = (mode >> 0) & 1;
         bool old_id1 = (mode >> 1) & 1;
         mode = (mode & ~0x03) | ((uint8_t)old_id0 << 1) | (uint8_t)old_id1;
     }
 
     if (mirror_x) {
-        mode ^= 0x01;   /* toggle ID[0] - X direction */
+        mode ^= 0x01;
     }
     if (mirror_y) {
-        mode ^= 0x02;   /* toggle ID[1] - Y direction */
+        mode ^= 0x02;
     }
 
     return mode;
@@ -178,8 +164,6 @@ static uint8_t compute_entry_mode(bool swap_xy, bool mirror_x, bool mirror_y)
 
 static esp_err_t update_entry_mode(ssd1685_panel_t *s)
 {
-    /* SSD168x does not provide a true 90-degree rotation. We keep the
-     * hardware entry mode in X-first order and apply swap_xy in software. */
     bool hw_swap = false;
     bool hw_mirror_x = s->swap_xy ? false : s->mirror_x;
     bool hw_mirror_y = s->swap_xy ? false : s->mirror_y;
@@ -228,23 +212,27 @@ static inline void set_bit_1bpp(uint8_t *dst, int row_bytes, int x, int y, uint8
     }
 }
 
-/* Set RAM window and address counters so writes map to [x0,y0]→[x1-1,y1-1] */
+/* Set RAM window and address counters. */
 static esp_err_t set_ram_window(ssd1685_panel_t *s,
                                  int x0, int y0, int x1, int y1)
 {
     uint8_t buf[4];
 
+    /* Apply the source-direction gap in physical RAM space.
+     * x_gap shifts the RAM window so pixel (0,0) maps to the first
+     * live source output (e.g. S8 on GDEY029T71H). */
+    x0 += s->x_gap;
+    x1 += s->x_gap;
+
     /* X address: in bytes (8 pixels per byte) */
     int xs_byte = x0 / 8;
     int xe_byte = (x1 - 1) / 8;
 
-    /* Set X window  [0x44] param: Xstart_byte, Xend_byte */
     buf[0] = (uint8_t)xs_byte;
     buf[1] = (uint8_t)xe_byte;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_SET_RAM_X_ADDR, buf, 2),
                         TAG, "set X addr window");
 
-    /* Set Y window  [0x45] param: Ystart_L, Ystart_H, Yend_L, Yend_H */
     buf[0] = (uint8_t)(y0 & 0xFF);
     buf[1] = (uint8_t)((y0 >> 8) & 0x01);
     buf[2] = (uint8_t)((y1 - 1) & 0xFF);
@@ -252,7 +240,6 @@ static esp_err_t set_ram_window(ssd1685_panel_t *s,
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_SET_RAM_Y_ADDR, buf, 4),
                         TAG, "set Y addr window");
 
-    /* Reset address counters [0x4E], [0x4F] */
     buf[0] = (uint8_t)xs_byte;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_SET_RAM_X_COUNTER, buf, 1),
                         TAG, "set X counter");
@@ -279,10 +266,9 @@ esp_err_t esp_lcd_ssd1685_refresh(esp_lcd_panel_handle_t handle,
         ctrl2 = SSD1685_DISP_CTRL2_PARTIAL_REFRESH;
         break;
     case SSD1685_REFRESH_FAST:
-        /* Fast mode: skip initial display stage (reduces ghosting penalty) */
         ctrl2 = 0xC7;
         break;
-    default: /* FULL */
+    default:
         ctrl2 = SSD1685_DISP_CTRL2_FULL_REFRESH;
         break;
     }
@@ -315,37 +301,34 @@ esp_err_t esp_lcd_ssd1685_clear(esp_lcd_panel_handle_t handle, uint8_t color_byt
     ssd1685_panel_t *s = __containerof(handle, ssd1685_panel_t, base);
 
     size_t num_bytes = ((size_t)s->width * s->height) / 8;
-    /* Fill in chunks to avoid large heap allocation */
     enum { CHUNK = 256 };
     uint8_t chunk[CHUNK];
     memset(chunk, color_byte, CHUNK);
 
-    /* B/W plane */
-    ESP_RETURN_ON_ERROR(set_ram_window(s, 0, 0, s->width, s->height),
-                        TAG, "clear: bw window");
-    /* Start pixel-data stream for B/W plane */
-    /* esp_lcd_panel_io_tx_color sends the command byte first */
-    size_t remaining = num_bytes;
-    /* We can't stream with tx_color in multiple calls easily, so we
-     * set the window and use tx_param for the first chunk, tx_color for rest.
-     * Actually the simplest approach: allocate heap if small enough, otherwise
-     * loop with window re-set (not needed since address auto-increments). */
-
-    /* Use a looping approach: send command once, data in chunks via tx_color */
+    /* B/W plane - use raw physical window (no gap offset; clear covers full RAM) */
     {
-        /* Send write-RAM command (this also sets D/C=1 for subsequent data) */
-        /* First call with cmd sets up the write; subsequent calls need to be
-         * raw data - but the IO layer wraps each call with cmd.  The SSD168x
-         * auto-increments the RAM counter on each byte so we can break the
-         * transfer into multiple esp_lcd_panel_io_tx_color() calls as long as
-         * we don't interleave commands. */
+        /* Reset window to full physical RAM, bypassing set_ram_window's gap logic */
+        uint8_t buf[4];
+        buf[0] = 0; buf[1] = (uint8_t)((s->width - 1) / 8);
+        esp_lcd_panel_io_tx_param(s->io, SSD1685_CMD_SET_RAM_X_ADDR, buf, 2);
+        buf[0] = 0; buf[1] = 0;
+        buf[2] = (uint8_t)((s->height - 1) & 0xFF);
+        buf[3] = (uint8_t)(((s->height - 1) >> 8) & 0x01);
+        esp_lcd_panel_io_tx_param(s->io, SSD1685_CMD_SET_RAM_Y_ADDR, buf, 4);
+        buf[0] = 0;
+        esp_lcd_panel_io_tx_param(s->io, SSD1685_CMD_SET_RAM_X_COUNTER, buf, 1);
+        buf[0] = 0; buf[1] = 0;
+        esp_lcd_panel_io_tx_param(s->io, SSD1685_CMD_SET_RAM_Y_COUNTER, buf, 2);
+    }
+
+    size_t remaining = num_bytes;
+    {
         size_t first_chunk = remaining < CHUNK ? remaining : CHUNK;
         ESP_RETURN_ON_ERROR(
             esp_lcd_panel_io_tx_color(s->io, SSD1685_CMD_WRITE_RAM_BW,
                                       chunk, first_chunk),
             TAG, "clear bw first chunk");
         remaining -= first_chunk;
-
         while (remaining > 0) {
             size_t sz = remaining < CHUNK ? remaining : CHUNK;
             ESP_RETURN_ON_ERROR(
@@ -356,12 +339,22 @@ esp_err_t esp_lcd_ssd1685_clear(esp_lcd_panel_handle_t handle, uint8_t color_byt
         }
     }
 
-    /* RED plane - fill with 0x00 (no red) */
-    uint8_t red_fill = 0x00;
+    /* RED plane */
     uint8_t red_chunk[CHUNK];
-    memset(red_chunk, red_fill, CHUNK);
-    ESP_RETURN_ON_ERROR(set_ram_window(s, 0, 0, s->width, s->height),
-                        TAG, "clear: red window");
+    memset(red_chunk, 0x00, CHUNK);
+    {
+        uint8_t buf[4];
+        buf[0] = 0; buf[1] = (uint8_t)((s->width - 1) / 8);
+        esp_lcd_panel_io_tx_param(s->io, SSD1685_CMD_SET_RAM_X_ADDR, buf, 2);
+        buf[0] = 0; buf[1] = 0;
+        buf[2] = (uint8_t)((s->height - 1) & 0xFF);
+        buf[3] = (uint8_t)(((s->height - 1) >> 8) & 0x01);
+        esp_lcd_panel_io_tx_param(s->io, SSD1685_CMD_SET_RAM_Y_ADDR, buf, 4);
+        buf[0] = 0;
+        esp_lcd_panel_io_tx_param(s->io, SSD1685_CMD_SET_RAM_X_COUNTER, buf, 1);
+        buf[0] = 0; buf[1] = 0;
+        esp_lcd_panel_io_tx_param(s->io, SSD1685_CMD_SET_RAM_Y_COUNTER, buf, 2);
+    }
     remaining = num_bytes;
     {
         size_t first_chunk = remaining < CHUNK ? remaining : CHUNK;
@@ -380,7 +373,6 @@ esp_err_t esp_lcd_ssd1685_clear(esp_lcd_panel_handle_t handle, uint8_t color_byt
         }
     }
 
-    /* Trigger full refresh */
     return esp_lcd_ssd1685_refresh(handle, SSD1685_REFRESH_FULL);
 }
 
@@ -405,8 +397,7 @@ esp_err_t esp_lcd_ssd1685_load_lut(esp_lcd_panel_handle_t handle,
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_WRITE_LUT, lut, lut_size),
                         TAG, "write LUT");
 
-    /* Signal to load the new LUT then wait */
-    uint8_t ctrl2 = 0x80;   /* Enable clock, load LUT */
+    uint8_t ctrl2 = 0x80;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_DISPLAY_UPDATE_CTRL2, &ctrl2, 1),
                         TAG, "disp ctrl2 load lut");
     ESP_RETURN_ON_ERROR(epd_cmd(s, SSD1685_CMD_MASTER_ACTIVATION), TAG, "activate lut");
@@ -415,7 +406,7 @@ esp_err_t esp_lcd_ssd1685_load_lut(esp_lcd_panel_handle_t handle,
 }
 
 /* =========================================================================
- * Factory function - esp_lcd_new_panel_ssd1685()
+ * Factory function
  * =========================================================================*/
 esp_err_t esp_lcd_new_panel_ssd1685(
         const esp_lcd_panel_io_handle_t io,
@@ -437,7 +428,6 @@ esp_err_t esp_lcd_new_panel_ssd1685(
     s = (ssd1685_panel_t *)calloc(1, sizeof(ssd1685_panel_t));
     ESP_GOTO_ON_FALSE(s, ESP_ERR_NO_MEM, err, TAG, "no mem for ssd1685 panel");
 
-    /* Populate internal state */
     s->io            = io;
     s->reset_gpio    = panel_dev_cfg->reset_gpio_num;
     s->reset_level   = panel_dev_cfg->flags.reset_active_high;
@@ -453,7 +443,6 @@ esp_err_t esp_lcd_new_panel_ssd1685(
     s->on_reset      = cfg->on_reset;
     s->on_reset_user_data = cfg->on_reset_user_data;
 
-    /* Configure BUSY GPIO as input */
     if (s->busy_gpio >= 0) {
         gpio_config_t io_conf = {
             .pin_bit_mask = (1ULL << s->busy_gpio),
@@ -465,7 +454,6 @@ esp_err_t esp_lcd_new_panel_ssd1685(
         ESP_GOTO_ON_ERROR(gpio_config(&io_conf), err, TAG, "BUSY gpio config");
     }
 
-    /* Configure RST GPIO as output if given */
     if (s->reset_gpio >= 0) {
         gpio_config_t io_conf = {
             .pin_bit_mask = (1ULL << s->reset_gpio),
@@ -477,7 +465,6 @@ esp_err_t esp_lcd_new_panel_ssd1685(
         ESP_GOTO_ON_ERROR(gpio_config(&io_conf), err, TAG, "RST gpio config");
     }
 
-    /* Wire up the panel ops vtable */
     s->base.del          = panel_ssd1685_del;
     s->base.reset        = panel_ssd1685_reset;
     s->base.init         = panel_ssd1685_init;
@@ -515,82 +502,85 @@ static esp_err_t panel_ssd1685_del(esp_lcd_panel_t *panel)
     return ESP_OK;
 }
 
-/* -------------------------------------------------------------------------
- * reset
- * -------------------------------------------------------------------------*/
 static esp_err_t panel_ssd1685_reset(esp_lcd_panel_t *panel)
 {
     ssd1685_panel_t *s = __containerof(panel, ssd1685_panel_t, base);
 
-    /* Optional pre-reset callback (e.g. power sequencing) */
     if (s->on_reset) {
         ESP_RETURN_ON_ERROR(s->on_reset(s->on_reset_user_data),
                             TAG, "on_reset callback");
     }
 
     if (s->reset_gpio >= 0) {
-        /* Assert reset (active low by default) */
         gpio_set_level((gpio_num_t)s->reset_gpio, s->reset_level ? 1 : 0);
         vTaskDelay(pdMS_TO_TICKS(10));
-        /* De-assert */
         gpio_set_level((gpio_num_t)s->reset_gpio, s->reset_level ? 0 : 1);
         vTaskDelay(pdMS_TO_TICKS(10));
     }
 
-    /* Software reset and wait for panel to be ready */
     ESP_RETURN_ON_ERROR(epd_cmd(s, SSD1685_CMD_SW_RESET), TAG, "sw reset");
     ESP_RETURN_ON_ERROR(esp_lcd_ssd1685_wait_busy(panel), TAG, "wait after reset");
 
     return ESP_OK;
 }
 
-/* -------------------------------------------------------------------------
- * init
- * -------------------------------------------------------------------------*/
 static esp_err_t panel_ssd1685_init(esp_lcd_panel_t *panel)
 {
     ssd1685_panel_t *s = __containerof(panel, ssd1685_panel_t, base);
     uint8_t buf[5];
 
-    /* 1. Driver output control  (0x01)
-     *    Sets total gate lines = (height - 1), scan direction TB=0 (G0→Gn)  */
+    /* 1. Driver output control (0x01) */
     uint16_t gate = (uint16_t)(s->height - 1);
     buf[0] = (uint8_t)(gate & 0xFF);
     buf[1] = (uint8_t)((gate >> 8) & 0x01);
-    buf[2] = 0x00;   /* GD=0, SM=0, TB=0 */
+    buf[2] = 0x00;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_DRIVER_OUTPUT_CTRL, buf, 3),
                         TAG, "driver output ctrl");
 
-    /* 2. Booster soft start  (0x0C)
-     *    Common values from Waveshare / Good Display reference code */
+    /* 2. Booster soft start (0x0C) */
     buf[0] = 0xAE; buf[1] = 0xC7; buf[2] = 0xC3; buf[3] = 0xC0; buf[4] = 0x40;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_BOOST_SOFTSTART, buf, 5),
                         TAG, "boost softstart");
 
-    /* 3. Data entry mode  (0x11) */
+    /* 3. Data entry mode (0x11) */
     ESP_RETURN_ON_ERROR(update_entry_mode(s), TAG, "data entry mode");
 
     /* 4. Set full RAM window */
     ESP_RETURN_ON_ERROR(set_ram_window(s, 0, 0, s->width, s->height),
                         TAG, "full RAM window");
 
-    /* 5. Border waveform  (0x3C)  -  HIZ (float) border */
+    /* 5. Border waveform (0x3C) */
     buf[0] = 0x01;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_WRITE_BORDER, buf, 1),
                         TAG, "border waveform");
 
-    /* 6. Temperature sensor  (0x18)  - internal */
+    /* 6. Temperature sensor (0x18) - internal */
     buf[0] = SSD1685_TEMP_SENSOR_INTERNAL;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_TEMP_SENSOR_CTRL, buf, 1),
                         TAG, "temp sensor");
 
-    /* 7. VCOM  (0x2C)  - -1.5 V (0x36) is a safe default; panel-specific */
+    /* 7. VCOM (0x2C) */
     buf[0] = 0x36;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_WRITE_VCOM_REG, buf, 1),
                         TAG, "vcom");
 
-    /* 8. Load OTP waveform: activate LUT from OTP */
-    buf[0] = 0xB1;   /* enable clock + analog, load LUT from OTP */
+    /* -----------------------------------------------------------------------
+     * Display Update Control 1 (0x21) is REQUIRED for GDEY029T71H and any other panel where the source
+     * outputs are not the default OTP mapping.  On GDEY029T71H, S8..S175 are
+     * connected to the TFT (168 sources, starting at offset 8).  The OTP
+     * programs the controller for a different (wider) source mapping.
+     *
+     * Sending 0x21 {0x00, 0x00} here selects the correct source output range
+     * before the first _setPartialRamArea / draw_bitmap call, exactly as
+     * GxEPD2 does in _InitDisplay().
+     * ----------------------------------------------------------------------- */
+    buf[0] = 0x00;
+    buf[1] = 0x00;
+    ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_DISPLAY_UPDATE_CTRL1, buf, 2),
+                        TAG, "display update ctrl1");
+
+    /* Load OTP waveform */
+    buf[0] = 0xB1;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_DISPLAY_UPDATE_CTRL2, buf, 1),
                         TAG, "disp ctrl2 otp lut");
     ESP_RETURN_ON_ERROR(epd_cmd(s, SSD1685_CMD_MASTER_ACTIVATION), TAG, "activate otp");
@@ -609,18 +599,6 @@ static esp_err_t panel_ssd1685_init(esp_lcd_panel_t *panel)
 
 /* -------------------------------------------------------------------------
  * draw_bitmap
- *
- * Parameters use the standard esp_lcd convention:
- *   x_start, y_start  - inclusive top-left
- *   x_end,   y_end    - exclusive bottom-right
- *   color_data         - packed 1 bpp bitmap, 1 = white / 0 = black,
- *                        MSB first, rows padded to byte boundary
- *
- * The function:
- *   1. Applies x_gap / y_gap offsets
- *   2. Sets the RAM window to the target rectangle
- *   3. Streams the data, applying colour inversion if requested
- *   4. Unless non_copy_mode is set, triggers a display refresh
  * -------------------------------------------------------------------------*/
 static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
                                             int x_start, int y_start,
@@ -630,16 +608,12 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
     ssd1685_panel_t *s = __containerof(panel, ssd1685_panel_t, base);
     ESP_RETURN_ON_FALSE(color_data, ESP_ERR_INVALID_ARG, TAG, "null color_data");
 
-    int logical_width = s->swap_xy ? s->height : s->width;
-    int logical_height = s->swap_xy ? s->width : s->height;
+    int logical_width  = s->swap_xy ? (int)s->height : (int)s->width;
+    int logical_height = s->swap_xy ? (int)s->width  : (int)s->height;
 
-    /* Apply viewport offset */
-    x_start += s->x_gap;
-    x_end   += s->x_gap;
-    y_start += s->y_gap;
-    y_end   += s->y_gap;
-
-    /* Clamp to logical bounds */
+    /* Clamp to logical (gap-adjusted) bounds.
+     * The caller already works in gap-compensated coordinates
+     * (LVGL display dimensions already exclude the gap pixels). */
     if (x_start < 0) x_start = 0;
     if (y_start < 0) y_start = 0;
     if (x_end > logical_width)  x_end  = logical_width;
@@ -649,30 +623,26 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
         return ESP_OK;
     }
 
-    /* Determine which RAM plane to write */
     uint8_t write_cmd = (s->active_plane == SSD1685_COLOR_PLANE_RED)
                         ? SSD1685_CMD_WRITE_RAM_RED
                         : SSD1685_CMD_WRITE_RAM_BW;
 
     if (!s->swap_xy) {
-        /* Set addressing window */
+        /* set_ram_window will add x_gap internally */
         ESP_RETURN_ON_ERROR(
             set_ram_window(s, x_start, y_start, x_end, y_end),
             TAG, "set RAM window");
 
-        /* Row width in bytes - each row is (x_end - x_start) bits, rounded up */
         int row_pixels = x_end - x_start;
         int row_bytes  = (row_pixels + 7) / 8;
         int num_rows   = y_end - y_start;
         size_t total_bytes = (size_t)row_bytes * num_rows;
 
         if (!s->invert_color) {
-            /* Fast path: send data as-is */
             ESP_RETURN_ON_ERROR(
                 esp_lcd_panel_io_tx_color(s->io, write_cmd, color_data, total_bytes),
                 TAG, "tx_color bw");
         } else {
-            /* Invert path: process in 256-byte chunks on the stack */
             enum { CHUNK_SZ = 256 };
             uint8_t chunk[CHUNK_SZ];
             const uint8_t *src = (const uint8_t *)color_data;
@@ -684,25 +654,19 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
                 for (size_t i = 0; i < sz; i++) {
                     chunk[i] = (uint8_t)~src[i];
                 }
-                if (first_chunk) {
-                    ESP_RETURN_ON_ERROR(
-                        esp_lcd_panel_io_tx_color(s->io, write_cmd, chunk, sz),
-                        TAG, "tx_color inv first");
-                    first_chunk = false;
-                } else {
-                    /* Subsequent chunks: keep the same write command active by
-                     * re-issuing tx_color.  The SSD168x auto-increments, so
-                     * each call simply continues the stream. */
-                    ESP_RETURN_ON_ERROR(
-                        esp_lcd_panel_io_tx_color(s->io, write_cmd, chunk, sz),
-                        TAG, "tx_color inv chunk");
-                }
+                ESP_RETURN_ON_ERROR(
+                    esp_lcd_panel_io_tx_color(s->io, write_cmd, chunk, sz),
+                    first_chunk ? TAG : TAG,
+                    "tx_color inv");
+                first_chunk = false;
                 src       += sz;
                 remaining -= sz;
             }
         }
     } else {
-        /* Software rotation path for swap_xy */
+        /* Software rotation path for swap_xy.
+         * map_logical_to_physical handles the swap+mirror transforms.
+         * set_ram_window will add x_gap to the resulting physical coords. */
         int src_w = x_end - x_start;
         int src_h = y_end - y_start;
 
@@ -712,55 +676,29 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
         map_logical_to_physical(s, x_start,     y_end - 1,   &px2, &py2);
         map_logical_to_physical(s, x_end - 1,   y_end - 1,   &px3, &py3);
 
-        int x_min = px0;
-        int x_max = px0;
-        int y_min = py0;
-        int y_max = py0;
-        if (px1 < x_min) {
-            x_min = px1;
-        }
-        if (px1 > x_max) {
-            x_max = px1;
-        }
-        if (px2 < x_min) {
-            x_min = px2;
-        }
-        if (px2 > x_max) {
-            x_max = px2;
-        }
-        if (px3 < x_min) {
-            x_min = px3;
-        }
-        if (px3 > x_max) {
-            x_max = px3;
-        }
-        if (py1 < y_min) {
-            y_min = py1;
-        }
-        if (py1 > y_max) {
-            y_max = py1;
-        }
-        if (py2 < y_min) {
-            y_min = py2;
-        }
-        if (py2 > y_max) {
-            y_max = py2;
-        }
-        if (py3 < y_min) {
-            y_min = py3;
-        }
-        if (py3 > y_max) {
-            y_max = py3;
-        }
+        int x_min = px0, x_max = px0;
+        int y_min = py0, y_max = py0;
+        if (px1 < x_min) x_min = px1;
+        if (px1 > x_max) x_max = px1;
+        if (px2 < x_min) x_min = px2;
+        if (px2 > x_max) x_max = px2;
+        if (px3 < x_min) x_min = px3;
+        if (px3 > x_max) x_max = px3;
+        if (py1 < y_min) y_min = py1;
+        if (py1 > y_max) y_max = py1;
+        if (py2 < y_min) y_min = py2;
+        if (py2 > y_max) y_max = py2;
+        if (py3 < y_min) y_min = py3;
+        if (py3 > y_max) y_max = py3;
 
         int dest_x0 = x_min;
         int dest_y0 = y_min;
-        int dest_w = (x_max - x_min) + 1;
-        int dest_h = (y_max - y_min) + 1;
+        int dest_w  = (x_max - x_min) + 1;
+        int dest_h  = (y_max - y_min) + 1;
 
-        int src_row_bytes = (src_w + 7) / 8;
+        int src_row_bytes  = (src_w + 7) / 8;
         int dest_row_bytes = (dest_w + 7) / 8;
-        size_t dest_size = (size_t)dest_row_bytes * dest_h;
+        size_t dest_size   = (size_t)dest_row_bytes * dest_h;
 
         uint8_t *rot = (uint8_t *)calloc(1, dest_size);
         ESP_RETURN_ON_FALSE(rot, ESP_ERR_NO_MEM, TAG, "rotate: no mem");
@@ -775,7 +713,6 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
                 if (bit == 0) {
                     continue;
                 }
-
                 int px, py;
                 map_logical_to_physical(s, x_start + lx, y_start + ly, &px, &py);
                 int dx = px - dest_x0;
@@ -784,6 +721,7 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
             }
         }
 
+        /* set_ram_window adds x_gap to dest_x0 in physical space */
         ESP_RETURN_ON_ERROR(set_ram_window(s, dest_x0, dest_y0,
                                            dest_x0 + dest_w, dest_y0 + dest_h),
                             TAG, "set RAM window rot");
@@ -792,7 +730,6 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
         ESP_RETURN_ON_ERROR(tx_ret, TAG, "tx_color rot");
     }
 
-    /* Auto-refresh unless the caller wants to batch updates */
     if (!s->non_copy_mode) {
         ESP_RETURN_ON_ERROR(
             esp_lcd_ssd1685_refresh(panel, s->refresh_mode),
@@ -802,15 +739,11 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
     return ESP_OK;
 }
 
-/* -------------------------------------------------------------------------
- * mirror / swap_xy
- * -------------------------------------------------------------------------*/
 static esp_err_t panel_ssd1685_mirror(esp_lcd_panel_t *panel, bool mx, bool my)
 {
     ssd1685_panel_t *s = __containerof(panel, ssd1685_panel_t, base);
     s->mirror_x = mx;
     s->mirror_y = my;
-    /* Apply immediately */
     return update_entry_mode(s);
 }
 
@@ -821,9 +754,6 @@ static esp_err_t panel_ssd1685_swap_xy(esp_lcd_panel_t *panel, bool swap)
     return update_entry_mode(s);
 }
 
-/* -------------------------------------------------------------------------
- * set_gap
- * -------------------------------------------------------------------------*/
 static esp_err_t panel_ssd1685_set_gap(esp_lcd_panel_t *panel,
                                         int x_gap, int y_gap)
 {
@@ -833,9 +763,6 @@ static esp_err_t panel_ssd1685_set_gap(esp_lcd_panel_t *panel,
     return ESP_OK;
 }
 
-/* -------------------------------------------------------------------------
- * invert_color
- * -------------------------------------------------------------------------*/
 static esp_err_t panel_ssd1685_invert_color(esp_lcd_panel_t *panel, bool invert)
 {
     ssd1685_panel_t *s = __containerof(panel, ssd1685_panel_t, base);
@@ -843,19 +770,11 @@ static esp_err_t panel_ssd1685_invert_color(esp_lcd_panel_t *panel, bool invert)
     return ESP_OK;
 }
 
-/* -------------------------------------------------------------------------
- * disp_on_off
- *
- * There is no backlight on an EPD.  We map this to:
- *   off = true  → deep sleep (image retained, display shows last frame)
- *   off = false → wake: SW reset + init
- * -------------------------------------------------------------------------*/
 static esp_err_t panel_ssd1685_disp_on_off(esp_lcd_panel_t *panel, bool off)
 {
     if (off) {
         return esp_lcd_ssd1685_sleep(panel, SSD1685_DEEP_SLEEP_MODE1);
     } else {
-        /* Re-initialise from scratch */
         ESP_RETURN_ON_ERROR(panel_ssd1685_reset(panel),  TAG, "wake: reset");
         ESP_RETURN_ON_ERROR(panel_ssd1685_init(panel),   TAG, "wake: init");
         return ESP_OK;
