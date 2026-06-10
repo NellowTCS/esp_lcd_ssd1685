@@ -57,14 +57,15 @@ static const char *TAG = "epd_demo";
 
 /* Bitmap helpers
  *
- * 1bpp, MSB-first, 1 = white, 0 = black.
+ * 1bpp, 1 = white, 0 = black.  LSB = leftmost pixel within each byte to
+ * match the SSD1685 source-line mapping on this panel.
  * Row stride = (width + 7) / 8 bytes. 
  */
 
 static inline void bmp_set_pixel(uint8_t *buf, int stride, int x, int y, int white)
 {
     int byte_idx = y * stride + (x >> 3);
-    uint8_t mask = (uint8_t)(1U << (7 - (x & 7)));
+    uint8_t mask = (uint8_t)(1U << (x & 7));
     if (white)
         buf[byte_idx] |= mask;
     else
