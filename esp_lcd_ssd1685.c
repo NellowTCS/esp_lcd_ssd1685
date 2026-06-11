@@ -212,17 +212,21 @@ static inline void set_bit_1bpp(uint8_t *dst, int row_bytes, int x, int y, uint8
     }
 }
 
-/* Set RAM window and address counters. */
+/* Set RAM window and address counters.
+ *
+ * Receives coordinates as-is. x_gap is NOT applied here.
+ *
+ * Each call site incorporates the gap differently:
+ *   Non-swap_xy: x_start += x_gap before calling (logical X = physical source).
+ *   swap_xy:     map_logical_to_physical() already produces correct source
+ *                indices (e.g. S8..S167 via mirror_x with width=168), so the
+ *                gap is already baked in. Adding it here would double-apply it.
+ *   Init/clear:  gap irrelevant; full RAM window is correct at (0,0,w,h).
+ */
 static esp_err_t set_ram_window(ssd1685_panel_t *s,
                                  int x0, int y0, int x1, int y1)
 {
     uint8_t buf[4];
-
-    /* Apply the source-direction gap in physical RAM space.
-     * x_gap shifts the RAM window so pixel (0,0) maps to the first
-     * live source output (e.g. S8 on GDEY029T71H). */
-    x0 += s->x_gap;
-    x1 += s->x_gap;
 
     /* X address: in bytes (8 pixels per byte) */
     int xs_byte = x0 / 8;
@@ -260,19 +264,33 @@ esp_err_t esp_lcd_ssd1685_refresh(esp_lcd_panel_handle_t handle,
 {
     ssd1685_panel_t *s = __containerof(handle, ssd1685_panel_t, base);
     uint8_t ctrl2;
+    uint8_t duc1[2];
 
     switch (mode) {
     case SSD1685_REFRESH_PARTIAL:
+        /* Partial refresh: RED RAM normal (match GxEPD2 _Update_Part) */
+        duc1[0] = 0x00;
+        duc1[1] = 0x00;
         ctrl2 = SSD1685_DISP_CTRL2_PARTIAL_REFRESH;
         break;
     case SSD1685_REFRESH_FAST:
+        duc1[0] = 0x40;   /* bypass RED as 0 */
+        duc1[1] = 0x00;
         ctrl2 = 0xC7;
         break;
-    default:
+    default: /* FULL */
+        /* Full refresh: bypass RED RAM as 0 (match GxEPD2 _Update_Full).
+         * This ensures the OTP waveform treats RED data as absent, which is
+         * correct for BW-only use and prevents any source-mapping side effects
+         * from the RED plane's OTP configuration. */
+        duc1[0] = 0x40;
+        duc1[1] = 0x00;
         ctrl2 = SSD1685_DISP_CTRL2_FULL_REFRESH;
         break;
     }
 
+    ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_DISPLAY_UPDATE_CTRL1, duc1, 2),
+                        TAG, "disp update ctrl1 pre-refresh");
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_DISPLAY_UPDATE_CTRL2, &ctrl2, 1),
                         TAG, "disp ctrl2");
     ESP_RETURN_ON_ERROR(epd_cmd(s, SSD1685_CMD_MASTER_ACTIVATION),
@@ -565,21 +583,27 @@ static esp_err_t panel_ssd1685_init(esp_lcd_panel_t *panel)
                         TAG, "vcom");
 
     /* -----------------------------------------------------------------------
-     * Display Update Control 1 (0x21) is REQUIRED for GDEY029T71H and any other panel where the source
+     * FIX (Bug 1): Display Update Control 1 (0x21)
+     *
+     * This is REQUIRED for GDEY029T71H and any other panel where the source
      * outputs are not the default OTP mapping.  On GDEY029T71H, S8..S175 are
      * connected to the TFT (168 sources, starting at offset 8).  The OTP
      * programs the controller for a different (wider) source mapping.
      *
      * Sending 0x21 {0x00, 0x00} here selects the correct source output range
      * before the first _setPartialRamArea / draw_bitmap call, exactly as
-     * GxEPD2 does in _InitDisplay().
+     * GxEPD2 does in _InitDisplay().  Without this, the source driver drives
+     * the wrong physical pixel columns, producing the black stripe artifact.
+     *
+     * Byte 1 (0x00): RED RAM normal (not bypassed)
+     * Byte 2 (0x00): source output selection matching panel wiring
      * ----------------------------------------------------------------------- */
     buf[0] = 0x00;
     buf[1] = 0x00;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_DISPLAY_UPDATE_CTRL1, buf, 2),
                         TAG, "display update ctrl1");
 
-    /* Load OTP waveform */
+    /* 8. Load OTP waveform */
     buf[0] = 0xB1;
     ESP_RETURN_ON_ERROR(epd_cmd_data(s, SSD1685_CMD_DISPLAY_UPDATE_CTRL2, buf, 1),
                         TAG, "disp ctrl2 otp lut");
@@ -599,6 +623,19 @@ static esp_err_t panel_ssd1685_init(esp_lcd_panel_t *panel)
 
 /* -------------------------------------------------------------------------
  * draw_bitmap
+ *
+ * Gap handling:
+ *   Non-swap_xy (portrait): x_gap is added to x_start/x_end before calling
+ *   set_ram_window, shifting logical [0..visible_w) to physical S8..S(8+w-1).
+ *
+ *   swap_xy (landscape): map_logical_to_physical() uses mirror_x with
+ *   s->width=168, which naturally maps logical x=0 -> physical S167 and
+ *   logical x=159 -> physical S8. The gap is already baked into the physical
+ *   coordinates; set_ram_window receives them directly without further addition.
+ *
+ *   Adding x_gap unconditionally (e.g. inside set_ram_window) double-applies
+ *   it for the swap_xy path, shifting the window to S16..S175 and breaking
+ *   the LVGL/rotated path while leaving the portrait path working.
  * -------------------------------------------------------------------------*/
 static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
                                             int x_start, int y_start,
@@ -628,9 +665,14 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
                         : SSD1685_CMD_WRITE_RAM_BW;
 
     if (!s->swap_xy) {
-        /* set_ram_window will add x_gap internally */
+        /* Non-swap (portrait): logical X == physical source direction.
+         * Apply x_gap here to shift from logical [0..visible_w) to physical
+         * RAM source [x_gap..x_gap+visible_w). set_ram_window takes the result
+         * as-is without adding any further offset. */
+        int phys_x0 = x_start + s->x_gap;
+        int phys_x1 = x_end   + s->x_gap;
         ESP_RETURN_ON_ERROR(
-            set_ram_window(s, x_start, y_start, x_end, y_end),
+            set_ram_window(s, phys_x0, y_start, phys_x1, y_end),
             TAG, "set RAM window");
 
         int row_pixels = x_end - x_start;
@@ -666,7 +708,7 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
     } else {
         /* Software rotation path for swap_xy.
          * map_logical_to_physical handles the swap+mirror transforms.
-         * set_ram_window will add x_gap to the resulting physical coords. */
+         * Physical coords are passed directly to set_ram_window (no gap addition). */
         int src_w = x_end - x_start;
         int src_h = y_end - y_start;
 
@@ -721,7 +763,10 @@ static esp_err_t panel_ssd1685_draw_bitmap(esp_lcd_panel_t *panel,
             }
         }
 
-        /* set_ram_window adds x_gap to dest_x0 in physical space */
+        /* swap_xy path: map_logical_to_physical() already produced correct
+         * physical source indices. mirror_x with s->width=168 maps logical
+         * x=0 -> physical x=167, logical x=159 -> physical x=8, giving
+         * dest_x0=8 which is exactly S8 (first live source). No gap addition. */
         ESP_RETURN_ON_ERROR(set_ram_window(s, dest_x0, dest_y0,
                                            dest_x0 + dest_w, dest_y0 + dest_h),
                             TAG, "set RAM window rot");
